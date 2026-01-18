@@ -4,108 +4,104 @@ import pdfplumber
 import re
 import pandas as pd
 
-# Configuración de la página
-st.set_page_config(page_title="Control de Facturas - Voltan Group", layout="wide")
+st.set_page_config(page_title="Gestión Contable - Voltan Group", layout="wide")
 
-# --- FUNCIONES LÓGICAS ---
+# --- FUNCIONES DE APOYO ---
 def normalizar_oc(texto):
-    if not texto or "No" in str(texto): 
-        return "No encontrado"
-    # Extraer solo números y guiones
+    if not texto or "No" in str(texto): return "No encontrado"
     limpio = re.sub(r'[^0-9-]', '', str(texto))
     if '-' in limpio:
-        try:
-            # Convierte 0001-0000499 en 1-499
-            return "-".join([str(int(p)) for p in limpio.split('-') if p.isdigit()])
-        except:
-            return limpio
+        try: return "-".join([str(int(p)) for p in limpio.split('-') if p.isdigit()])
+        except: return limpio
     return str(int(limpio)) if limpio.isdigit() else limpio
 
 def extraer_datos_pdf(pdf_file):
     try:
         with pdfplumber.open(pdf_file) as pdf:
             texto_completo = ""
-            for page in pdf.pages:
-                texto_completo += page.extract_text() or ""
-            
-            # 1. Buscar Orden de Compra (OC, Servicio, etc.)
+            primera_descripcion = "No encontrada"
+            for i, page in enumerate(pdf.pages):
+                texto_pag = page.extract_text() or ""
+                texto_completo += texto_pag
+                # Extraer descripción (basado en una posición común o palabra clave)
+                if i == 0:
+                    lineas = texto_pag.split('\n')
+                    for linea in lineas:
+                        if any(k in linea.upper() for k in ["DESC", "CANT", "SERV"]):
+                            # Intentamos agarrar la línea siguiente a la cabecera
+                            idx = lineas.index(linea)
+                            if idx + 1 < len(lineas):
+                                primera_descripcion = lineas[idx+1][:60] # Primeros 60 caracteres
+                                break
+
+            # Buscar OC y CECO
             patron_oc = r"(?:ORDEN DE COMPRA|OC|O/C|SERVICIO)[:\s-]*(\d+(?:-\d+)?)"
             match_oc = re.search(patron_oc, texto_completo, re.IGNORECASE)
-            oc_encontrada = match_oc.group(1) if match_oc else "No encontrado"
             
-            # 2. Buscar Centro de Costo (CECO)
             patron_ceco = r"(?:CENTRO DE COSTO|CECO|C\. COSTO)[:\s-]*([A-Z0-9\s-]+)"
             match_ceco = re.search(patron_ceco, texto_completo, re.IGNORECASE)
-            if match_ceco:
-                # Limpiamos el texto para que no traiga saltos de línea
-                ceco_encontrado = match_ceco.group(1).strip().split('\n')[0]
-            else:
-                ceco_encontrado = "No especificado"
             
-            return {"oc": oc_encontrada, "ceco": ceco_encontrado}
-    except Exception as e:
-        return {"oc": "Error", "ceco": "Error"}
+            # Buscar Detracción (Porcentaje y Código)
+            patron_cod_det = r"(?:CÓDIGO|COD|COD\.)\s*(?:DE)?\s*DETRACCI[ÓO]N[:\s-]*(\d{3})"
+            match_cod = re.search(patron_cod_det, texto_completo, re.IGNORECASE)
+            
+            patron_pct_det = r"(\d{1,2})\s*%\s*(?:DE)?\s*DETRACCI[ÓO]N"
+            match_pct = re.search(patron_pct_det, texto_completo, re.IGNORECASE)
 
-# --- INTERFAZ DE USUARIO ---
-st.title("🛡️ Sistema de Validación Voltan Group")
-st.write("Detección de Facturas, Órdenes de Compra y Centros de Costo")
+            return {
+                "oc": match_oc.group(1) if match_oc else "No encontrado",
+                "ceco": match_ceco.group(1).strip().split('\n')[0] if match_ceco else "No especificado",
+                "desc": primera_descripcion,
+                "cod_det": match_cod.group(1) if match_cod else "N/A",
+                "pct_det": float(match_pct.group(1)) if match_pct else 0.0
+            }
+    except:
+        return {"oc": "Error", "ceco": "Error", "desc": "Error", "cod_det": "N/A", "pct_det": 0.0}
+
+# --- INTERFAZ ---
+st.title("🛡️ Plataforma Contable Voltan Group")
 st.markdown("---")
 
-col1, col2 = st.columns([1, 2])
+f_xml = st.file_uploader("1. XML Factura", type=["xml"])
+f_pdf = st.file_uploader("2. PDF Factura", type=["pdf"])
+f_oc = st.file_uploader("3. PDF Orden de Compra", type=["pdf"])
 
-with col1:
-    st.subheader("📁 Cargar Documentos")
-    f_xml = st.file_uploader("1. XML Factura (SUNAT)", type=["xml"])
-    f_pdf = st.file_uploader("2. PDF Factura", type=["pdf"])
-    f_oc = st.file_uploader("3. PDF Orden de Compra", type=["pdf"])
+if st.button("🚀 PROCESAR Y CALCULAR"):
+    if f_xml and f_pdf and f_oc:
+        # Procesar XML
+        tree = ET.parse(f_xml)
+        root = tree.getroot()
+        ns = {'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2',
+              'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2'}
+        
+        prov = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyLegalEntity/cbc:RegistrationName', ns).text
+        monto_total = float(root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text)
+        moneda_raw = root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).attrib.get('currencyID')
+        # Cambiar símbolos por USD o PEN
+        moneda = "PEN" if moneda_raw == "PEN" else "USD" if moneda_raw == "USD" else moneda_raw
 
-with col2:
-    st.subheader("📋 Resultado del Análisis")
-    if st.button("EJECUTAR VALIDACIÓN"):
-        if f_xml and f_pdf and f_oc:
-            try:
-                # --- PROCESAR XML (SUNAT) ---
-                tree = ET.parse(f_xml)
-                root = tree.getroot()
-                ns = {'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2',
-                      'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2'}
-                
-                prov = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyLegalEntity/cbc:RegistrationName', ns).text
-                monto = root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text
-                
-                # --- PROCESAR PDFs ---
-                datos_f = extraer_datos_pdf(f_pdf)
-                datos_o = extraer_datos_pdf(f_oc)
-                
-                v_oc_factura = normalizar_oc(datos_f['oc'])
-                v_oc_documento = normalizar_oc(datos_o['oc'])
-                
-                # --- MOSTRAR RESULTADOS ---
-                st.info(f"**Proveedor:** {prov} | **Monto:** S/ {monto}")
-                
-                # Validación de OC con semáforo
-                if datos_f['oc'] == "No encontrado":
-                    st.warning("⚠️ ESTADO: NO SE ENCONTRÓ REGISTRO DE OC EN LA FACTURA")
-                elif v_oc_factura == v_oc_documento:
-                    st.success(f"✅ ESTADO: COINCIDE TOTALMENTE (OC: {v_oc_factura})")
-                    st.balloons()
-                else:
-                    st.error(f"❌ ESTADO: NO COINCIDE")
-                    st.write(f"Factura dice: **{datos_f['oc']}** | OC dice: **{datos_o['oc']}**")
+        # Procesar PDFs
+        d_f = extraer_datos_pdf(f_pdf)
+        d_o = extraer_datos_pdf(f_oc)
+        
+        # Cálculos de Detracción
+        monto_detraccion = monto_total * (d_f['pct_det'] / 100)
+        cuota_pago = monto_total - monto_detraccion
 
-                # Mostrar Centro de Costo
-                st.markdown(f"**Centro de Costo Detectado en OC:** `{datos_o['ceco']}`")
-                
-                # Tabla Resumen
-                data_tabla = {
-                    "Concepto": ["Número de OC", "Centro de Costo", "Monto Total"],
-                    "En Factura PDF": [datos_f['oc'], "No aplica", f"S/ {monto}"],
-                    "En Orden de Compra": [datos_o['oc'], datos_o['ceco'], "-"],
-                    "Resultado": ["COINCIDE" if v_oc_factura == v_oc_documento else "REVISAR", "EXTRAÍDO", "OK"]
-                }
-                st.table(pd.DataFrame(data_tabla))
-                
-            except Exception as e:
-                st.error(f"Error al procesar los archivos: {e}")
-        else:
-            st.error("Por favor, cargue los tres archivos (XML, PDF y OC).")
+        # --- MOSTRAR RESULTADOS ---
+        st.subheader(f"Resumen para: {prov}")
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Monto Total", f"{moneda} {monto_total:,.2f}")
+        c2.metric("Detracción (%)", f"{d_f['pct_det']}%")
+        c3.metric("Importe Detracción", f"{moneda} {monto_detraccion:,.2f}")
+        c4.metric("Valor Cuota (Neto)", f"{moneda} {cuota_pago:,.2f}", delta_color="normal")
+
+        st.markdown("---")
+        
+        # Tabla Detallada
+        data_final = {
+            "Campo": ["Descripción Producto/Servicio", "Código Detracción", "Centro de Costo (CECO)", "Orden de Compra"],
+            "Información Extraída": [d_f['desc'], d_f['cod_det'], d_o['ceco'], d_f['oc']],
+            "Estado": ["OK", "Validar" if d_f['cod_det'] == "N/A" else "Detectado", "Extraído", 
+                        "COINCIDE" if normalizar_oc(d_f['oc']) == normalizar_oc(d_o['oc
