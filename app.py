@@ -1,77 +1,60 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pdfplumber
-import pandas as pd
 import re
+import pandas as pd
 
-st.set_page_config(page_title="Validador Voltan Group", layout="wide")
+st.set_page_config(page_title="Control de Facturas - Voltan Group", layout="wide")
 
-# --- FUNCIONES DE EXTRACCIÓN ---
+# --- FUNCIONES LÓGICAS ---
 
-def extraer_datos_xml(xml_file):
-    try:
-        tree = ET.parse(xml_file)
-        root = tree.getroot()
-        ns = {
-            'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2',
-            'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2'
-        }
-        ruc = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyIdentification/cbc:ID', ns).text
-        monto = float(root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text)
-        folio = root.find('cbc:ID', ns).text
-        return {"ruc": ruc, "monto": monto, "folio": folio}
-    except:
-        return None
+def normalizar_oc(texto):
+    if not texto or "No" in texto: return "No encontrado"
+    # Extraer solo números y guiones, y quitar ceros a la izquierda
+    limpio = re.sub(r'[^0-9-]', '', texto)
+    if '-' in limpio:
+        return "-".join([str(int(p)) for p in limpio.split('-') if p.isdigit()])
+    return str(int(limpio)) if limpio.isdigit() else limpio
 
-def buscar_texto_en_pdf(pdf_file, patron_regex):
+def extraer_oc_pdf(pdf_file):
     with pdfplumber.open(pdf_file) as pdf:
-        texto_completo = ""
-        for pagina in pdf.pages:
-            texto_completo += pagina.extract_text() or ""
-        
-        # Buscamos el patrón (ejemplo: un número de OC)
-        resultado = re.search(patron_regex, texto_completo, re.IGNORECASE)
-        return resultado.group(0) if resultado else "No encontrado"
+        texto = "".join([p.extract_text() or "" for p in pdf.pages])
+        # Busca patrones como OC: 001-45, Orden de Compra 00023, etc.
+        patron = r"(?:ORDEN DE COMPRA|OC|O/C|SERVICIO)[:\s-]*(\d+(?:-\d+)?)"
+        match = re.search(patron, texto, re.IGNORECASE)
+        return match.group(1) if match else "No encontrado"
 
 # --- INTERFAZ ---
-st.title("🇵🇪 Sistema de Validación de Compras")
+st.title("🛡️ Sistema de Validación Voltan Group")
+st.markdown("---")
 
-col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.header("1. Carga de Archivos")
-    f_xml = st.file_uploader("XML de la Factura", type=["xml"])
-    f_pdf = st.file_uploader("PDF de la Factura", type=["pdf"])
-    f_oc = st.file_uploader("PDF de la Orden de Compra", type=["pdf"])
-    
-    # Campo para que el usuario diga cómo empieza su número de OC (ejemplo: OC- o 2024-)
-    patron_oc = st.text_input("Patrón de número de OC (Ejemplo: OC-\d+)", value="OC-\d+")
+    st.subheader("📁 Cargar Documentos")
+    f_xml = st.file_uploader("XML Factura (SUNAT)", type=["xml"])
+    f_pdf = st.file_uploader("PDF Factura", type=["pdf"])
+    f_oc = st.file_uploader("PDF Orden de Compra", type=["pdf"])
 
 with col2:
-    st.header("2. Resultado de Validación")
-    if st.button("Validar Documentación"):
+    st.subheader("📋 Resultado del Análisis")
+    if st.button("EJECUTAR VALIDACIÓN"):
         if f_xml and f_pdf and f_oc:
-            # 1. Obtener datos del XML
-            datos_xml = extraer_datos_xml(f_xml)
+            # 1. Procesar XML para datos generales
+            tree = ET.parse(f_xml)
+            root = tree.getroot()
+            ns = {'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2',
+                  'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2'}
             
-            # 2. Buscar OC dentro del PDF de la Factura
-            oc_en_factura = buscar_texto_en_pdf(f_pdf, patron_oc)
+            prov = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyLegalEntity/cbc:RegistrationName', ns).text
+            monto = root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text
             
-            # 3. Buscar OC dentro del PDF de la Orden de Compra
-            oc_en_documento_oc = buscar_texto_en_pdf(f_oc, patron_oc)
+            # 2. Lógica de OC
+            oc_en_factura = extraer_oc_pdf(f_pdf)
+            oc_en_documento = extraer_oc_pdf(f_oc)
             
-            # --- MOSTRAR RESULTADOS ---
-            st.write(f"**Factura:** {datos_xml['folio']} | **Monto:** S/ {datos_xml['monto']}")
-            st.write(f"**OC detectada en Factura:** {oc_en_factura}")
-            st.write(f"**OC detectada en Documento OC:** {oc_en_documento_oc}")
+            val_factura = normalizar_oc(oc_en_factura)
+            val_documento = normalizar_oc(oc_en_documento)
             
-            st.divider()
-            
-            # Lógica de semáforo
-            if oc_en_factura == oc_en_documento_oc and oc_en_factura != "No encontrado":
-                st.success("✅ ¡COINCIDENCIA TOTAL! La factura corresponde a la orden de compra.")
-                st.balloons()
-            else:
-                st.error("❌ ERROR DE CONCORDANCIA: Los números de OC no coinciden o no se encontraron.")
-        else:
-            st.warning("Asegúrate de subir los 3 archivos.")
+            # --- CAMPO DE VALIDACIÓN (SEMÁFORO) ---
+            st.write(f"**Proveedor:** {prov} | **Monto:** S/
