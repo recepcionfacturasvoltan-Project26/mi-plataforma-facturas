@@ -2,79 +2,76 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pdfplumber
 import pandas as pd
+import re
 
-# Configuración de la página
-st.set_page_config(page_title="Recepción Voltan Group - Perú", layout="wide")
+st.set_page_config(page_title="Validador Voltan Group", layout="wide")
 
-st.title("🇵🇪 Recepción de Facturas Electrónicas (SUNAT)")
-st.markdown("Carga los archivos para validar la información automáticamente.")
+# --- FUNCIONES DE EXTRACCIÓN ---
 
-# Función para extraer datos del XML de Perú
-def extraer_datos_sunat(xml_file):
+def extraer_datos_xml(xml_file):
     try:
         tree = ET.parse(xml_file)
         root = tree.getroot()
-        
-        # Los XML de Perú usan prefijos (namespaces). Definimos los comunes:
         ns = {
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2',
             'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2'
         }
+        ruc = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyIdentification/cbc:ID', ns).text
+        monto = float(root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text)
+        folio = root.find('cbc:ID', ns).text
+        return {"ruc": ruc, "monto": monto, "folio": folio}
+    except:
+        return None
 
-        # Extraer datos principales
-        ruc_emisor = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyIdentification/cbc:ID', ns).text
-        nombre_emisor = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyLegalEntity/cbc:RegistrationName', ns).text
-        serie_correlativo = root.find('cbc:ID', ns).text
-        fecha = root.find('cbc:IssueDate', ns).text
-        monto_total = root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text
-        moneda = root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).attrib.get('currencyID')
+def buscar_texto_en_pdf(pdf_file, patron_regex):
+    with pdfplumber.open(pdf_file) as pdf:
+        texto_completo = ""
+        for pagina in pdf.pages:
+            texto_completo += pagina.extract_text() or ""
         
-        # Intentar extraer la Orden de Compra si viene en el XML
-        oc_referencia = "No indicada en XML"
-        oc_node = root.find('.//cac:OrderReference/cbc:ID', ns)
-        if oc_node is not None:
-            oc_referencia = oc_node.text
+        # Buscamos el patrón (ejemplo: un número de OC)
+        resultado = re.search(patron_regex, texto_completo, re.IGNORECASE)
+        return resultado.group(0) if resultado else "No encontrado"
 
-        return {
-            "RUC Emisor": ruc_emisor,
-            "Razón Social": nombre_emisor,
-            "Documento": serie_correlativo,
-            "Fecha": fecha,
-            "Monto Total": f"{moneda} {monto_total}",
-            "OC en XML": oc_referencia
-        }
-    except Exception as e:
-        return f"Error al leer el XML: {e}"
+# --- INTERFAZ ---
+st.title("🇵🇪 Sistema de Validación de Compras")
 
-# --- INTERFAZ DE USUARIO ---
-col1, col2 = st.columns(2)
+col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("1. Carga de Documentos")
-    xml_input = st.file_uploader("Subir XML (Factura)", type=["xml"])
-    pdf_input = st.file_uploader("Subir PDF (Factura)", type=["pdf"])
-    oc_input = st.file_uploader("Subir Orden de Compra (PDF)", type=["pdf"])
+    st.header("1. Carga de Archivos")
+    f_xml = st.file_uploader("XML de la Factura", type=["xml"])
+    f_pdf = st.file_uploader("PDF de la Factura", type=["pdf"])
+    f_oc = st.file_uploader("PDF de la Orden de Compra", type=["pdf"])
+    
+    # Campo para que el usuario diga cómo empieza su número de OC (ejemplo: OC- o 2024-)
+    patron_oc = st.text_input("Patrón de número de OC (Ejemplo: OC-\d+)", value="OC-\d+")
 
 with col2:
-    st.subheader("2. Resultados de la Extracción")
-    if st.button("Procesar Documentos"):
-        if xml_input and pdf_input:
-            # Procesar XML
-            datos = extraer_datos_sunat(xml_input)
+    st.header("2. Resultado de Validación")
+    if st.button("Validar Documentación"):
+        if f_xml and f_pdf and f_oc:
+            # 1. Obtener datos del XML
+            datos_xml = extraer_datos_xml(f_xml)
             
-            if isinstance(datos, dict):
-                # Mostrar resultados en una tabla bonita
-                df = pd.DataFrame([datos])
-                st.table(df)
-                
-                # Lógica de comparación simple con la OC
-                if oc_input:
-                    st.info(f"Analizando coincidencia con Orden de Compra...")
-                    # Aquí el sistema compararía los datos
-                    st.success("✅ Validación completa: El proveedor y el monto coinciden.")
-                else:
-                    st.warning("⚠️ Falta cargar la Orden de Compra para validación total.")
+            # 2. Buscar OC dentro del PDF de la Factura
+            oc_en_factura = buscar_texto_en_pdf(f_pdf, patron_oc)
+            
+            # 3. Buscar OC dentro del PDF de la Orden de Compra
+            oc_en_documento_oc = buscar_texto_en_pdf(f_oc, patron_oc)
+            
+            # --- MOSTRAR RESULTADOS ---
+            st.write(f"**Factura:** {datos_xml['folio']} | **Monto:** S/ {datos_xml['monto']}")
+            st.write(f"**OC detectada en Factura:** {oc_en_factura}")
+            st.write(f"**OC detectada en Documento OC:** {oc_en_documento_oc}")
+            
+            st.divider()
+            
+            # Lógica de semáforo
+            if oc_en_factura == oc_en_documento_oc and oc_en_factura != "No encontrado":
+                st.success("✅ ¡COINCIDENCIA TOTAL! La factura corresponde a la orden de compra.")
+                st.balloons()
             else:
-                st.error(datos)
+                st.error("❌ ERROR DE CONCORDANCIA: Los números de OC no coinciden o no se encontraron.")
         else:
-            st.error("Es obligatorio subir el XML y el PDF de la factura.")
+            st.warning("Asegúrate de subir los 3 archivos.")
