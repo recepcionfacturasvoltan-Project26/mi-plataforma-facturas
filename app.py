@@ -3,11 +3,11 @@ import xml.etree.ElementTree as ET
 import pdfplumber
 import re
 import pandas as pd
-from datetime import datetime
 
-st.set_page_config(page_title="Voltan Group - Control Fiscal", layout="wide")
+st.set_page_config(page_title="Voltan Group - Recepción Pro", layout="wide")
 
-# --- FUNCIONES DE EXTRACCIÓN XML (LA VERDAD LEGAL) ---
+# --- FUNCIONES DE EXTRACCIÓN ---
+
 def extraer_datos_xml(xml_file):
     try:
         tree = ET.parse(xml_file)
@@ -16,102 +16,108 @@ def extraer_datos_xml(xml_file):
             'cbc': 'urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2',
             'cac': 'urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2'
         }
-        
-        # Datos de Cabecera
-        ruc_emisor = root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyIdentification/cbc:ID', ns).text
-        ruc_receptor = root.find('.//cac:AccountingCustomerParty/cac:Party/cac:PartyIdentification/cbc:ID', ns).text
-        comprobante = root.find('cbc:ID', ns).text
-        fecha = root.find('cbc:IssueDate', ns).text
-        moneda = root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).attrib.get('currencyID')
-        
-        # Totales
-        base_imponible = float(root.find('.//cac:TaxSubtotal/cbc:TaxableAmount', ns).text)
-        igv = float(root.find('.//cac:TaxSubtotal/cbc:TaxAmount', ns).text)
-        total = float(root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text)
-        
         return {
-            "RUC_E": ruc_emisor, "RUC_R": ruc_receptor, "ID": comprobante,
-            "FECHA": fecha, "MONEDA": moneda, "BASE": base_imponible,
-            "IGV": igv, "TOTAL": total
+            "RUC_E": root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyIdentification/cbc:ID', ns).text,
+            "RAZON_SOCIAL": root.find('.//cac:AccountingSupplierParty/cac:Party/cac:PartyLegalEntity/cbc:RegistrationName', ns).text,
+            "RUC_R": root.find('.//cac:AccountingCustomerParty/cac:Party/cac:PartyIdentification/cbc:ID', ns).text,
+            "ID": root.find('cbc:ID', ns).text,
+            "FECHA": root.find('cbc:IssueDate', ns).text,
+            "MONEDA": "PEN" if "PEN" in root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).attrib.get('currencyID') else "USD",
+            "BASE": float(root.find('.//cac:TaxSubtotal/cbc:TaxableAmount', ns).text),
+            "IGV": float(root.find('.//cac:TaxSubtotal/cbc:TaxAmount', ns).text),
+            "TOTAL": float(root.find('.//cac:LegalMonetaryTotal/cbc:PayableAmount', ns).text)
         }
     except: return None
 
-# --- FUNCIONES DE EXTRACCIÓN PDF ---
-def extraer_datos_pdf(pdf_file):
+def extraer_datos_pdf_factura(pdf_file):
     with pdfplumber.open(pdf_file) as pdf:
         texto = "".join([p.extract_text() or "" for p in pdf.pages])
-        
-        # Buscar Código de Detracción (ej: 019)
-        match_cod = re.search(r"SUJETOS A DETRACCI[ÓO]N[:\s-]*(\d{3})", texto)
-        # Buscar % de detracción
+        # Buscar código de detracción (3 dígitos) y porcentaje
+        match_cod = re.search(r"DETRACCI[ÓO]N[:\s-]*(\d{3})", texto)
         match_pct = re.search(r"(\d{1,2})\s*%\s*(?:DE)?\s*DETRACCI[ÓO]N", texto)
-        # Buscar OC y CECO
         match_oc = re.search(r"(?:OC|ORDEN|SERVICIO)[:\s-]*(\d+(?:-\d+)?)", texto, re.IGNORECASE)
-        match_ceco = re.search(r"(?:CECO|CENTRO COSTO)[:\s-]*([A-Z0-9-]+)", texto, re.IGNORECASE)
         
         return {
             "COD_DET": match_cod.group(1) if match_cod else "N/A",
             "PCT_DET": float(match_pct.group(1)) if match_pct else 0.0,
-            "OC_NUM": match_oc.group(1) if match_oc else "No encontrado",
-            "CECO": match_ceco.group(1) if match_ceco else "ADMIN"
+            "OC_REF": match_oc.group(1) if match_oc else "No encontrado"
+        }
+
+def extraer_datos_pdf_oc(pdf_file):
+    with pdfplumber.open(pdf_file) as pdf:
+        texto = "".join([p.extract_text() or "" for p in pdf.pages])
+        # Condición de Pago
+        match_pago = re.search(r"COND\.\s*PAGO[:\s-]*([A-Z0-9\s]+)", texto, re.IGNORECASE)
+        # Situación de la OC
+        match_situacion = re.search(r"SITUACI[ÓO]N\s*[:\s-]*([A-ZÁÉÍÓÚ]+)", texto, re.IGNORECASE)
+        # Centro de Costo
+        match_ceco = re.search(r"(?:CECO|CENTRO COSTO)[:\s-]*([A-Z0-9-]+)", texto, re.IGNORECASE)
+        
+        return {
+            "COND_PAGO": match_pago.group(1).strip() if match_pago else "No encontrado",
+            "SITUACION": match_situacion.group(1).strip() if match_situacion else "PENDIENTE",
+            "CECO": match_ceco.group(1).strip() if match_ceco else "ADMIN"
         }
 
 # --- INTERFAZ ---
-st.title("🇵🇪 Plataforma de Recepción Voltan Group")
+st.title("🇵🇪 Reporte Horizontal de Recepción - Voltan Group")
 
-col_files = st.columns(3)
-with col_files[0]: f_xml = st.file_uploader("XML Factura", type=["xml"])
-with col_files[1]: f_pdf = st.file_uploader("PDF Factura", type=["pdf"])
-with col_files[2]: f_oc = st.file_uploader("PDF Orden de Compra", type=["pdf"])
+f_xml = st.file_uploader("Cargar XML Factura", type=["xml"])
+f_pdf = st.file_uploader("Cargar PDF Factura", type=["pdf"])
+f_oc = st.file_uploader("Cargar PDF Orden de Compra", type=["pdf"])
 
-if st.button("PROCESAR REGISTRO"):
+if st.button("GENERAR REPORTE HORIZONTAL"):
     if f_xml and f_pdf and f_oc:
-        xml_data = extraer_datos_xml(f_xml)
-        pdf_f = extraer_datos_pdf(f_pdf)
-        pdf_o = extraer_datos_pdf(f_oc)
+        x = extraer_datos_xml(f_xml)
+        pf = extraer_datos_pdf_factura(f_pdf)
+        po = extraer_datos_pdf_oc(f_oc)
         
-        # LÓGICA DE DETRACCIÓN (Regla de S/ 700.01)
-        aplica_detraccion = "NO"
-        monto_detraccion = 0.0
-        # Solo aplica si es PEN y > 700 o si es USD (convertido)
-        if (xml_data['MONEDA'] == "PEN" and xml_data['TOTAL'] > 700.00) or xml_data['MONEDA'] == "USD":
-            if pdf_f['PCT_DET'] > 0:
-                aplica_detraccion = "SÍ"
-                monto_detraccion = xml_data['TOTAL'] * (pdf_f['PCT_DET'] / 100)
+        # Lógica Fiscal Detracciones
+        monto_det = 0.0
+        pct_det = pf['PCT_DET']
+        if (x['MONEDA'] == "PEN" and x['TOTAL'] > 700.00) or x['MONEDA'] == "USD":
+            monto_det = x['TOTAL'] * (pct_det / 100)
         
-        neto_pagar = xml_data['TOTAL'] - monto_detraccion
-        
-        # VALIDACIÓN DE ORDEN DE COMPRA
-        oc_aprobada = "APROBADO ✅" if pdf_f['OC_NUM'] in pdf_o['OC_NUM'] else "REVISAR ❌"
+        neto = x['TOTAL'] - monto_det
 
-        # --- REPORTE HORIZONTAL ---
-        st.subheader("📊 Vista Previa del Reporte (Horizontal)")
-        
-        registro_horizontal = {
-            "Fecha": xml_data['FECHA'],
-            "Proveedor RUC": xml_data['RUC_E'],
-            "Comprobante": xml_data['ID'],
-            "Moneda": xml_data['MONEDA'],
-            "Base Imponible": xml_data['BASE'],
-            "IGV": xml_data['IGV'],
-            "Total Factura": xml_data['TOTAL'],
-            "Aplica Detrac.": aplica_detraccion,
-            "Cod. Detrac.": pdf_f['COD_DET'],
-            "Monto Detrac.": round(monto_detraccion, 2),
-            "Neto a Pagar": round(neto_pagar, 2),
-            "OC": pdf_f['OC_NUM'],
-            "CECO": pdf_o['CECO'],
-            "Validación OC": oc_aprobada
+        # --- ARMADO DEL REPORTE HORIZONTAL ---
+        data = {
+            "Fecha Emisión": x['FECHA'],
+            "RUC Proveedor": x['RUC_E'],
+            "Razón Social": x['RAZON_SOCIAL'],
+            "Comprobante": x['ID'],
+            "Moneda": x['MONEDA'],
+            "Base Imponible": x['BASE'],
+            "IGV": x['IGV'],
+            "Total Factura": x['TOTAL'],
+            "% Detrac.": f"{pct_det}%",
+            "Monto Detrac.": round(monto_det, 2),
+            "Neto a Pagar": round(neto, 2),
+            "Cód. Detrac.": pf['COD_DET'],
+            "OC Referencia": pf['OC_REF'],
+            "Cond. Pago (OC)": po['COND_PAGO'],
+            "CECO": po['CECO'],
+            "Situación OC": po['SITUACION']
         }
+
+        df = pd.DataFrame([data])
         
-        df_reporte = pd.DataFrame([registro_horizontal])
-        st.dataframe(df_reporte) # Muestra la tabla horizontal
+        st.subheader("📋 Registro para Reporte")
+        st.dataframe(df) # Tabla horizontal completa
 
-        # --- VALIDACIÓN XML VS PDF ---
-        with st.expander("Verificar Integridad XML vs PDF"):
-            if xml_data['TOTAL'] > 0:
-                st.write("✅ La Base Imponible + IGV coinciden con el Total del XML.")
-                st.write(f"✅ Documento de Orden de Compra: **{oc_aprobada}**")
-
+        # Validaciones Visuales
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+        with c1:
+            if po['SITUACION'] == "APROBADO":
+                st.success(f"✅ ESTADO OC: {po['SITUACION']}")
+            else:
+                st.warning(f"⚠️ ESTADO OC: {po['SITUACION']}")
+        
+        with c2:
+            if monto_det > 0:
+                st.info(f"💡 Aplica Detracción: {x['MONEDA']} {monto_det:,.2f}")
+            else:
+                st.write("Factura libre de detracción.")
     else:
-        st.error("Por favor cargue los 3 archivos.")
+        st.error("Faltan archivos para completar el reporte.")
